@@ -1,0 +1,6 @@
+PyQt6
+SQLAlchemy
+pandas
+yfinance
+numpy
+scipy
