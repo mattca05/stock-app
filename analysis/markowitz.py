@@ -4,6 +4,7 @@ from datetime import date
 
 try:
     from sklearn.covariance import LedoitWolf
+
     HAVE_SKLEARN = True
 except Exception:
     HAVE_SKLEARN = False
@@ -22,6 +23,7 @@ class MarkowitzOptimizer:
         max_volatility: float | None = None,
         use_ledoit_wolf: bool = True,
         l2_lambda: float = 0.0,
+        pinned: dict[str, float] | None = None,
     ):
         self.min_weight = min_weight
         self.max_weight = max_weight
@@ -30,6 +32,7 @@ class MarkowitzOptimizer:
         self.max_volatility = max_volatility
         self.use_ledoit_wolf = use_ledoit_wolf
         self.l2_lambda = l2_lambda
+        self.pinned = pinned or {}
 
     def optimize(self, prices: dict[str, list[tuple[date, float]]]) -> dict:
         series = self._build_returns(prices)
@@ -43,9 +46,15 @@ class MarkowitzOptimizer:
         self._check_feasible(n)
         bounds = self._make_bounds(n)
 
-        w_minvar = self._min_variance(mu, cov, bounds)
-        w_maxsh  = self._max_sharpe(mu, cov, bounds)
-        frontier = self._efficient_frontier(mu, cov, bounds)
+        pinned_idx: dict[int, float] = {
+            tickers.index(symbol): weight
+            for symbol, weight in self.pinned.items()
+            if symbol in tickers
+        }
+
+        w_minvar = self._min_variance(mu, cov, bounds, pinned=pinned_idx)
+        w_maxsh = self._max_sharpe(mu, cov, bounds, pinned=pinned_idx)
+        frontier = self._efficient_frontier(mu, cov, bounds, pinned=pinned_idx)
 
         def stats(w):
             ret = float(w @ mu)
@@ -56,38 +65,37 @@ class MarkowitzOptimizer:
         r_min, v_min, s_min = stats(w_minvar)
         r_max, v_max, s_max = stats(w_maxsh)
 
-        individual_stats = {
-            t: {
-                "annual_return":     round(float(mu[i]), 4),
-                "annual_volatility": round(float(np.sqrt(cov[i, i])), 4),
-            }
-            for i, t in enumerate(tickers)
-        }
-
         return {
             "tickers": tickers,
             "min_variance": {
-                "weights":               {t: round(float(w), 4) for t, w in zip(tickers, w_minvar)},
+                "weights": {t: round(float(w), 4) for t, w in zip(tickers, w_minvar)},
                 "expected_annual_return": r_min,
-                "annual_volatility":      v_min,
-                "sharpe_ratio":           s_min,
+                "annual_volatility": v_min,
+                "sharpe_ratio": s_min,
             },
             "max_sharpe": {
-                "weights":               {t: round(float(w), 4) for t, w in zip(tickers, w_maxsh)},
+                "weights": {t: round(float(w), 4) for t, w in zip(tickers, w_maxsh)},
                 "expected_annual_return": r_max,
-                "annual_volatility":      v_max,
-                "sharpe_ratio":           s_max,
+                "annual_volatility": v_max,
+                "sharpe_ratio": s_max,
             },
             "efficient_frontier": frontier,
-            "individual_stats":   individual_stats,
+            "individual_stats": {
+                t: {
+                    "annual_return": round(float(mu[i]), 4),
+                    "annual_volatility": round(float(np.sqrt(cov[i, i])), 4),
+                }
+                for i, t in enumerate(tickers)
+            },
+            "pinned": {tickers[i]: w for i, w in pinned_idx.items()},
             "settings": {
-                "min_weight":      self.min_weight,
-                "max_weight":      self.max_weight,
-                "no_short":        self.no_short,
-                "risk_free_rate":  self.risk_free_rate,
-                "max_volatility":  self.max_volatility,
+                "min_weight": self.min_weight,
+                "max_weight": self.max_weight,
+                "no_short": self.no_short,
+                "risk_free_rate": self.risk_free_rate,
+                "max_volatility": self.max_volatility,
                 "use_ledoit_wolf": self.use_ledoit_wolf and HAVE_SKLEARN,
-                "l2_lambda":       self.l2_lambda,
+                "l2_lambda": self.l2_lambda,
             },
         }
 
@@ -101,10 +109,7 @@ class MarkowitzOptimizer:
             if len(price_data) < 2:
                 continue
             px = [p for _, p in price_data]
-            returns = [
-                np.log(px[i] / px[i - 1])
-                for i in range(1, len(px))
-            ]
+            returns = [np.log(px[i] / px[i - 1]) for i in range(1, len(px))]
             series[ticker] = returns
         return series
 
@@ -113,12 +118,10 @@ class MarkowitzOptimizer:
     ) -> tuple[np.ndarray, list[str]]:
         tickers = list(series.keys())
         min_len = min(len(v) for v in series.values())
-        matrix  = np.array([series[t][-min_len:] for t in tickers]).T  # (days, n)
+        matrix = np.array([series[t][-min_len:] for t in tickers]).T  # (days, n)
         return matrix, tickers
 
-    def _estimate_mu_cov(
-        self, matrix: np.ndarray
-    ) -> tuple[np.ndarray, np.ndarray]:
+    def _estimate_mu_cov(self, matrix: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         mu_daily = matrix.mean(axis=0)
         mu = mu_daily * TRADING_DAYS
 
@@ -150,25 +153,34 @@ class MarkowitzOptimizer:
             )
 
     def _make_constraints(
-        self, mu: np.ndarray | None = None, target_return: float | None = None
+        self,
+        mu: np.ndarray | None = None,
+        target_return: float | None = None,
+        pinned: dict[int, float] | None = None,
     ) -> list[dict]:
         cons = [{"type": "eq", "fun": lambda w: np.sum(w) - 1.0}]
         if target_return is not None and mu is not None:
-            cons.append({
-                "type": "eq",
-                "fun": lambda w, mu=mu, tr=target_return: (w @ mu) - tr
-            })
+            cons.append(
+                {"type": "eq", "fun": lambda w, mu=mu, tr=target_return: (w @ mu) - tr}
+            )
+        if pinned:
+            for i, val in pinned.items():
+                cons.append({"type": "eq", "fun": lambda w, i=i, val=val: w[i] - val})
         return cons
 
     def _l2_penalty(self, w: np.ndarray) -> float:
-        return float(self.l2_lambda * np.sum(w ** 2)) if self.l2_lambda > 0 else 0.0
+        return float(self.l2_lambda * np.sum(w**2)) if self.l2_lambda > 0 else 0.0
 
     # ── Solvers ───────────────────────────────────────────────
 
     def _min_variance(
-        self, mu: np.ndarray, cov: np.ndarray, bounds: list
+        self,
+        mu: np.ndarray,
+        cov: np.ndarray,
+        bounds: list,
+        pinned: dict[int, float] | None = None,
     ) -> np.ndarray:
-        n  = len(mu)
+        n = len(mu)
         w0 = np.ones(n) / n
 
         def objective(w):
@@ -176,14 +188,17 @@ class MarkowitzOptimizer:
 
         def grad(w):
             w = np.asarray(w)
-            return 2.0 * (cov @ w) + (2.0 * self.l2_lambda * w if self.l2_lambda > 0 else 0.0)
+            return 2.0 * (cov @ w) + (
+                2.0 * self.l2_lambda * w if self.l2_lambda > 0 else 0.0
+            )
 
         result = minimize(
-            objective, w0,
+            objective,
+            w0,
             method="SLSQP",
             jac=grad,
             bounds=bounds,
-            constraints=self._make_constraints(),
+            constraints=self._make_constraints(pinned=pinned),
             options={"maxiter": 300, "ftol": 1e-9},
         )
         if not result.success:
@@ -191,9 +206,13 @@ class MarkowitzOptimizer:
         return result.x
 
     def _max_sharpe(
-        self, mu: np.ndarray, cov: np.ndarray, bounds: list
+        self,
+        mu: np.ndarray,
+        cov: np.ndarray,
+        bounds: list,
+        pinned: dict[int, float] | None = None,
     ) -> np.ndarray:
-        n  = len(mu)
+        n = len(mu)
         w0 = np.ones(n) / n
         rf = self.risk_free_rate
 
@@ -203,15 +222,19 @@ class MarkowitzOptimizer:
             sharpe = (ret - rf) / vol if vol > 0 else -np.inf
             return -sharpe + self._l2_penalty(w)
 
-        cons = self._make_constraints()
+        cons = self._make_constraints(pinned=pinned)
         if self.max_volatility is not None:
-            cons.append({
-                "type": "ineq",
-                "fun": lambda w, cov=cov: self.max_volatility - np.sqrt(w @ cov @ w)
-            })
+            cons.append(
+                {
+                    "type": "ineq",
+                    "fun": lambda w, cov=cov: self.max_volatility
+                    - np.sqrt(w @ cov @ w),
+                }
+            )
 
         result = minimize(
-            objective, w0,
+            objective,
+            w0,
             method="SLSQP",
             bounds=bounds,
             constraints=cons,
@@ -222,10 +245,15 @@ class MarkowitzOptimizer:
         return result.x
 
     def _efficient_frontier(
-        self, mu: np.ndarray, cov: np.ndarray, bounds: list, points: int = 40
+        self,
+        mu: np.ndarray,
+        cov: np.ndarray,
+        bounds: list,
+        points: int = 40,
+        pinned: dict[int, float] | None = None,
     ) -> list[dict]:
-        n      = len(mu)
-        w0     = np.ones(n) / n
+        n = len(mu)
+        w0 = np.ones(n) / n
         frontier = []
 
         for target_r in np.linspace(float(mu.min()), float(mu.max()), points):
@@ -234,14 +262,18 @@ class MarkowitzOptimizer:
                 w0,
                 method="SLSQP",
                 bounds=bounds,
-                constraints=self._make_constraints(mu=mu, target_return=target_r),
+                constraints=self._make_constraints(
+                    mu=mu, target_return=target_r, pinned=pinned
+                ),
                 options={"maxiter": 300, "ftol": 1e-9},
             )
             if result.success:
                 vol = float(np.sqrt(result.x @ cov @ result.x))
-                frontier.append({
-                    "return":     round(float(target_r), 4),
-                    "volatility": round(vol, 4),
-                })
+                frontier.append(
+                    {
+                        "return": round(float(target_r), 4),
+                        "volatility": round(vol, 4),
+                    }
+                )
 
         return frontier

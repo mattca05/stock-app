@@ -29,6 +29,15 @@ class PriceService:
             )
             return [(r.date, r.close) for r in results]
 
+    def get_names_for_tickers(self, symbols: list[str]) -> dict[str, str]:
+        with self._db.session() as session:
+            tickers = (
+                session.query(Ticker.symbol, Ticker.name)
+                .filter(Ticker.symbol.in_(symbols))
+                .all()
+            )
+            return {row.symbol: row.name or row.symbol for row in tickers}
+
     def get_prices_for_tickers(
         self, symbols: list[str]
     ) -> dict[str, list[tuple[date, float]]]:

@@ -29,7 +29,6 @@ from ui.constants import (
 class FilterSidebar(QFrame):
     go_back = pyqtSignal()
     filters_changed = pyqtSignal(list)  # emits list[tuple[str, str]]
-    run_requested = pyqtSignal(list)  # emits when Run is clicked
 
     def __init__(self):
         super().__init__()
@@ -61,7 +60,6 @@ class FilterSidebar(QFrame):
         btn_layout.addWidget(self._create_button("Undo", self._undo_filter))
         layout.addLayout(btn_layout)
 
-        layout.addWidget(self._create_button("Run Analysis", self._run_analysis))
         layout.addStretch()
         self._load_filters()
 
@@ -157,8 +155,3 @@ class FilterSidebar(QFrame):
         if self._selected_filters:
             self._selected_filters.pop()
             self._refresh_selected()
-
-    def _run_analysis(self):
-        if not self._selected_filters:
-            return
-        self.run_requested.emit(self._selected_filters)

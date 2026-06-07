@@ -32,8 +32,20 @@ class PortfolioAnalysisView(QWidget):
     def _connect_signals(self):
         self.sidebar.go_back.connect(self.go_back)
         self.sidebar.filters_changed.connect(self._on_filters_changed)
-        self.sidebar.run_requested.connect(self.content.on_filters_changed)
+        self.sidebar.filters_changed.connect(self.content.on_filters_changed)
+        self.ticker_selector.tickers_changed.connect(self.content.on_tickers_changed)
 
     def _on_filters_changed(self, filters: list[tuple[str, str]]):
+        if not filters:
+            self.ticker_selector.load_tickers([])
+            self.content.on_tickers_changed({"available": [], "held": {}})
+            return
+
         tickers = self._exchange_manager.get_all_tickers_from_filters(filters)
         self.ticker_selector.load_tickers(tickers)
+        self.content.on_tickers_changed(
+            {
+                "available": [s for s, _ in tickers],
+                "held": self.ticker_selector._held_tickers,
+            }
+        )
