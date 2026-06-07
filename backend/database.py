@@ -5,8 +5,14 @@ from typing import Generator
 from backend.models import Base
 from dotenv import load_dotenv
 import os
+import sys
 
-load_dotenv()
+if getattr(sys, "frozen", False):
+    # Running as PyInstaller bundle — .env is next to the .exe
+    _base = os.path.dirname(sys.executable)
+    load_dotenv(os.path.join(_base, ".env"))
+else:
+    load_dotenv()
 
 
 class Database:
